@@ -1,0 +1,262 @@
+---
+title: "Financial_Modeling_Challenge"
+author: "Qian Wang"
+date: "January 14, 2017"
+output: html_document
+---
+version 
+"Darwin Kernel Version 13.4.0: Mon Jan 11 18:17:34 PST 2016; root:xnu-2422.115.15~1/RELEASE_X86_64"
+
+platform       x86_64-apple-darwin13.4.0   
+arch           x86_64                      
+os             darwin13.4.0                
+system         x86_64, darwin13.4.0        
+status                                     
+major          3                           
+minor          3.1                         
+year           2016                        
+month          06                          
+day            21                          
+svn rev        70800                       
+language       R                           
+version.string R version 3.3.1 (2016-06-21)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library, message=FALSE, warning=FALSE}
+library(rhdf5)
+library(dplyr)
+library(tidyr)
+library(caret)
+library(corrplot)
+library(rpart)
+library(ggplot2)
+```
+
+# Introduction about this project (Financial Modeling Challenge from Kaggle)
+This dataset contains anonymized features pertaining to a time-varying value for a financial instrument. Each instrument has an id. Time is represented by the 'timestamp' feature and the variable to predict is 'y'. No further information will be provided on the meaning of the features, the transformations that were applied to them, the timescale, or the type of instruments that are included in the data. Moreover, in accordance with competition rules, participants must not use data other than the data linked from the competition website for the purpose of use in this competition to develop and test their models and submissions.
+For more details, please visit: [https://www.kaggle.com/c/two-sigma-financial-modeling/data](https://www.kaggle.com/c/two-sigma-financial-modeling/data)
+
+The specific aim is to build a model to predict the `y` based on the rest of features (variables).
+
+### Download the file
+The data source is supplied by Kaggle: https://www.kaggle.com/c/two-sigma-financial-modeling/downloads/train.h5.zip
+```{r download.file, eval=FALSE, cache=FALSE}
+rm(list=ls())
+setwd("~/Documents")
+if (!file.exists("KaggleProject")) dir.create("KaggleProject")
+fileUrl <- "https://www.kaggle.com/c/two-sigma-financial-modeling/downloads/train.h5.zip"
+download.file(fileUrl, destfile = "./KaggleProject/train.h5.zip")
+unzip("./KaggleProject/train.h5.zip",exdir="./KaggleProject")
+```
+
+
+### Quick glance of the h5 file:
+
+```{r check.file}
+h5ls("train.h5")
+```
+
+From there we can observe that the `block1_items` contains the names of each variables. The `block1_values` contains the real values we want.
+
+### Read the dataset
+
+```{r read.file, cache=FALSE}
+block1_items  <- h5read("train.h5",name = "train/block1_items")
+block1_values  <- h5read("train.h5",name = "train/block1_values")
+
+# Extract the data set "Train"
+Train <- as.matrix(block1_values)
+Train <- t(Train)
+colnames(Train) <- block1_items
+Train <- as.data.frame(Train)
+dim(Train)
+```
+
+### Clean the data
+
+Since there are always NA or NaN in the raw dataset, it is neccessary to remove them before real analysis
+
+```{r clean.data, cache=FALSE}
+# Remove the observation that contains the NA or NaN values
+good <- apply(Train,1,function(x) sum(is.na(x)))==0
+Train <- Train[good,]
+dim(Train)
+```
+
+Check out the correlation between each variables. Remove the ones highly correlated to others, so as to save the further modeling time.
+```{r plot_corr, cache=TRUE,fig.width=18, fig.height=18}
+# Check out the correlation between each variables
+# png(filename = "FinancialCh.png", width = 4800,height = 4800,units = "px")
+rrow <- sample(1:dim(Train)[1],50)
+ corGraph <- cor(Train[rrow, ])
+ corrplot(corGraph, order = "FPC", method = "number", type = "lower", 
+         tl.cex = 0.8, tl.col = rgb(0, 0, 0),number.cex = 0.7, number.digits = 2)
+# dev.off()
+```
+
+According to the plot, all of the following variables are correlated to other existed variables. So we are going to remove them. The list is shown below:
+`fundamental_61,fundamental_11,fundamental_56,fundamental_26,fundamental_10,fundamental_15,fundamental_57,fundamental_41,fundamental_30,fundamental_53,fundamental_42,fundamental_26,fundamental_10,fundamental_60,fundamental_48,fundamental_55,fundamental_11,fundamental_45,fundamental_16,fundamental_34,fundamental_12,fundamental_51,fundamental_43,fundamental_1,fundamental_42,fundamental_30,fundamental_53`
+
+```{r var_remove}
+Train <- Train %>%
+        select(-c(fundamental_61,fundamental_11,fundamental_56,fundamental_26,fundamental_10,fundamental_15,fundamental_57,fundamental_41,fundamental_30,fundamental_53,fundamental_42,fundamental_26,fundamental_10,fundamental_60,fundamental_48,fundamental_55,fundamental_11,fundamental_45,fundamental_16,fundamental_34,fundamental_12,fundamental_51,fundamental_43,fundamental_1,fundamental_42,fundamental_30,fundamental_53))
+dim(Train)
+```
+
+### Initial linear model by lm() function
+
+```{r ini_fit, cache=TRUE}
+set.seed(2017-01-10)
+inTrain <- createDataPartition(Train$y,p=0.7, list=FALSE)
+trainSet <- Train[inTrain,]
+testSet <- Train[-inTrain,]
+ini.fit <- lm(y~., data = trainSet)
+
+# Predict the y of testSet to compare with the real y of testSet
+pred_ini.fit <-predict.lm(ini.fit, newdata = testSet,interval = "none")
+
+# R value 
+R_sq <- 1- (sum((pred_ini.fit-testSet$y)^2))/(sum((testSet$y-mean(testSet$y))^2))
+R_val<- sign(R_sq)*sqrt(abs(R_sq))
+R_val        
+```
+
+This `R_val` is not generalized. It does depends on the `set.seed()`. In order to get the more accurate estimation of the R-value, we need to send 50 or more random seeds and average the `R_val`. Now this is just a glance of the `R_val`. We are going to re-calculate again once the other parameters having been settled down.
+
+Calculate the `train_error` and `test_error` for the ini.fit; plot these two errors versus the number of the observation we used. This can give you some ideas about whether the modeling is high bias or high variance.
+
+```{r error_plot, cache=TRUE, fig.align="center"}
+set.seed(2017-01-10)
+R_val <- NULL
+J_train <- NULL
+J_test <- NULL
+for (obs in rw<-c(5000,10000,25000,50000,75000,100000)){
+        A <- trainSet[1:obs,]
+        fit <- lm(y~., data = A)
+        pred_train <-predict.lm(ini.fit, newdata = A,interval = "none")
+        pred_cv <-predict.lm(ini.fit, newdata = testSet,interval = "none")
+        
+        i <- which(obs==rw)
+        
+        R_sq <- 1- (sum((pred_cv-testSet$y)^2))/(sum((testSet$y-mean(testSet$y))^2))
+        R_val[i] <- sign(R_sq)*sqrt(abs(R_sq))
+        
+        J_train[i] <- 1/(2*obs)*sum((pred_train-trainSet[1:obs,]$y)^2)
+        J_test[i] <- 1/(2*obs)*sum((pred_cv-testSet$y)^2)
+}
+rw <- as.data.frame(rw)
+R_val <- as.data.frame(R_val)
+J_train <- as.data.frame(J_train)
+J_test <- as.data.frame(J_test)
+R_val <- cbind(R_val,rw)
+J_ <- cbind(J_train,J_test,rw)
+J_error <- J_ %>%
+        gather(type,errors,-rw)
+g <- ggplot(data = J_error,aes(x=rw,y=errors,color=type))
+g <- g + geom_point() + geom_line()
+g <- g + labs(x="numbers of observations")
+g <- g + ggtitle("Errors versus the number of observations") +
+  theme(plot.title = element_text(hjust = 0.5))
+g
+```
+
+According to the `train_error` (green) and `test_error` (red) lines, they both converged to a quite small value ~0.0001. This means that the model does NOT undergo the high bias or high variance. Since they intersected when the observation number was `75000`, so in futuer test we can set the numbers of `75000` for the quick modeling filering. 
+
+### Filter the variables to optimize the modeling
+Not all of the variables are neccessary for a perfect model. Sometimes redundant variables has nothing to do with the accuracy but slow down the computing rate.
+```{r var_optim, eval=FALSE,echo=TRUE}
+set.seed(2017-01-10)
+Set <- Train[sample(1:dim(Train)[1], 75000),]
+inifit<- lm(y~., data=Set)
+#do.call(anova,lm.ls)
+bestfit <- step(inifit,direction = "both")
+```
+
+```{r var_optimize, cache=TRUE,echo=TRUE,include=FALSE}
+set.seed(2017-01-10)
+Set <- Train[sample(1:dim(Train)[1], 75000),]
+inifit<- lm(y~., data=Set)
+#do.call(anova,lm.ls)
+bestfit <- step(inifit,direction = "both")
+```
+
+The variables shown down below are the variables of `bestfit` finally determined by `step()` function. We are going to recruit them for the final modeling.
+
+```{r}
+bestfit$call
+```
+
+Input the selected variables for the final model fit:
+
+```{r fit.final, cache=TRUE}
+fit_final <- lm(formula = y ~ fundamental_5 + fundamental_7 + fundamental_14 + 
+     fundamental_17 + fundamental_19 + fundamental_20 + fundamental_21 + 
+     fundamental_31 + fundamental_33 + fundamental_36 + fundamental_40 + 
+     fundamental_44 + fundamental_46 + fundamental_47 + fundamental_49 + 
+     fundamental_63 + technical_0 + technical_7 + technical_11 + 
+     technical_16 + technical_20 + technical_21 + technical_22 + 
+     technical_27 + technical_30 + technical_32 + technical_36 + 
+     technical_37 + technical_44, data = trainSet)
+```
+
+### Check out the `train_error` and `test_error`
+
+```{r var.num, cache=TRUE,eval=TRUE}
+pred.train <-predict.lm(fit_final, newdata = trainSet,interval = "none")
+pred.cv <-predict.lm(fit_final, newdata = testSet,interval = "none")
+J.train <- 1/(2*obs)*sum((pred.train-trainSet$y)^2)
+J.test <- 1/(2*obs)*sum((pred.cv-testSet$y)^2)        
+```
+
+```{r}
+sprintf("The train_error is %.5f", J.train)
+sprintf("The test_error is %.5f", J.test)
+```
+According to the results above, both the `train_error` and `test_error` are close to a small value of ~0.0001 level. This indicates that the model does NOT undergo high bias or high variance.
+
+### Calculate the R_val to grade the linear model
+In order to get more close to the real value in order to decrease the random effect from the data set partition, we set up 100 times partition to obtain 100 variant `train.Set` and `test.Set`. The R value will be finally averaged and estimated there.
+
+```{r R.val, cache=TRUE,eval=TRUE}
+# Modeling fit
+R.val <- rep(0,100)
+
+for (i in 1:100) {
+        set.seed(i)
+        inTrain <- createDataPartition(Train$y,p=0.7, list=FALSE)
+        train.Set <- Train[inTrain,]
+        test.Set <- Train[-inTrain,]
+        fit_ <- lm(y~fundamental_5 + fundamental_7 + fundamental_14 + 
+     fundamental_17 + fundamental_19 + fundamental_20 + fundamental_21 + 
+     fundamental_31 + fundamental_33 + fundamental_36 + fundamental_40 + 
+     fundamental_44 + fundamental_46 + fundamental_47 + fundamental_49 + 
+     fundamental_63 + technical_0 + technical_7 + technical_11 + 
+     technical_16 + technical_20 + technical_21 + technical_22 + 
+     technical_27 + technical_30 + technical_32 + technical_36 + 
+     technical_37 + technical_44, data = train.Set, na.action=na.exclude)
+        
+        # Predict the y of testSet to compare with the real y of testSet
+        pred.lm <-predict.lm(fit_, newdata = test.Set,interval = "none")
+        
+        # R value 
+        R.sq <- 1- (sum((pred.lm-test.Set$y)^2))/(sum((test.Set$y-mean(test.Set$y))^2))
+        R.val[i] <- sign(R.sq)*sqrt(abs(R.sq))
+        
+}
+```
+
+```{r presentation, cache=TRUE}
+sprintf("The R value for the model is %.4f",mean(R.val))
+fit_final$summary
+```
+
+
+
+
+
+
+
+
